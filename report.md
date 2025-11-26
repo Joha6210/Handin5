@@ -13,20 +13,24 @@
 - Correctness 1
 - Correctness 2
 
+<div class="page"/>
+
 ## 1. Introduction
 
 This project aims to implement a distributed auctioning system in Golang using gRPC, and a leader-based replication based on these [slides](https://learnit.itu.dk/pluginfile.php/394900/course/section/165229/Lecture_9_Replication.pdf).
 The system consists of:
 
 - Clients that submit bids and query auction results
-- Auction servers that expose bid operations to clients and hold local auction state. Part of the auction servers is the:
-  - Backend servers (running on the same node, as the auction server) that coordinate leader election, maintain a replicated view of the auction state, and propagate updates among replicas
+- Auction servers that expose bid operations to clients and hold local auction state. Each auction server has a backend component:
+  - Backend: (running on the same node, as the auction server) that coordinate leader election, maintain a replicated view of the auction state, and propagate updates among replicas
 
 Service and replica discovery use [zeroconf](https://github.com/grandcat/zeroconf), allowing nodes to dynamically join and leave the system.
 
 The system maintains a auction in which clients repeatedly bid, the auction servers ensures replicated consistency of the current highest bid. Clients can join at anytime and participate in the auction. The auction will end when the Lamport Clock is over 100.
 
 ## 2. Architecture
+
+The project is implemented in two parts 1. Clients and 2. Auction servers. The Clients and the Auction server communicate via the gRPC service _"Auction"_, while the Auction servers communicate with each other via the gRPC service _"Backend"_ this separation ensures that clients only access the functionality intended for them, while internal coordination (election etc.) and replication logic remain encapsulated server-side.
 
 ### Clients
 
@@ -45,6 +49,8 @@ Auction server (frontend) is responsible for:
 - Returning results via Result()
 - Updating the other replicas with the new bid
 - If not the leader, then forward bid to the leader
+
+<div class="page"/>
 
 gRPC methods related to auction service:
 
@@ -78,7 +84,9 @@ service Backend {
 }
 ```
 
-### Bully
+<div class="page"/>
+
+#### Bully
 
 The Bully algorithm is a leader election algorithm for distributed systems where crashes are allowed, and can be detected by timeouts.
 There are 3 types of messages:
@@ -107,6 +115,8 @@ On pi receive ‘election’ do
 end on
 ```
 
+<div class="page"/>
+
 ## 3. Correctness 1
 
 A system is sequentially consistent if:
@@ -118,23 +128,20 @@ Which means that there should exists a legal interleaving of all operations crea
 
 All bids made to the _service_ is passed through a single leader, (Bid directly or via forwardBid). The leader imposes a total order on updates. Because of this the leader becomes responsible for deciding whether a bid is accepted or not, and for determining the order in which bids are applied. When the leader has accepted the update it is then send through to the replicas.
 
-Replicas apply updates in the order received from the leader, and the leader never issues two updates concurrently, it all happens synchronously.
+Replicas apply updates in the order received from the leader, and the leader never issues two updates concurrently, updates all happens synchronously to maintain order.
 
 Reads observe the currentBid value consistent with the leader’s chosen order.
 Clients call Result on frontends, which return the locally replicated value matching the leader’s chosen update ordering.
 
+<div class="page"/>
+
 ## 4. Correctness 2
-Case 1: Absence of Failures
 
-In fault-free executions:
-
-Exactly one leader exists.
+In fault-free executions exactly one leader exists.
 Nodes start with a configured leader (discovers a leader via mDNS), this makes it possible for all bids to go through the leader, providing a total order of updates.
 The leader updates replicas after each accepted bid, ensuring eventual consistency of all nodes.
 
 Clients always receive an up-to-date and legal auction state, as reads come from frontends synchronized with their backends.
-
-Case 2: Single Crash-Stop Faults
 
 The system tolerates crash-stop failures of either a:
 
@@ -143,6 +150,8 @@ The system tolerates crash-stop failures of either a:
 or a
 
 - Leader node
+
+The minimum number of nodes, needed to keep the system is alive is 1.
 
 ### Follower Failure
 
