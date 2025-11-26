@@ -1,0 +1,40 @@
+2025/11/26 16:41:26 [Client Alice] Discovered server node: 1 (192.168.2.75:5001)
+2025/11/26 16:41:26 [Client Alice] Discovered server node: 2 (192.168.2.75:5002)
+2025/11/26 16:41:26 [Client Alice] connected successfully!
+2025/11/26 16:41:26 [Client Alice] connected to 192.168.2.75:5001
+2025/11/26 16:41:26 [Client Alice] Trying to bid... (1)
+2025/11/26 16:41:26 [Client Alice] Bid successful
+2025/11/26 16:41:33 [Client Alice] Trying to bid... (3)
+2025/11/26 16:41:33 [Client Alice] Bid successful
+2025/11/26 16:41:34 [Client Alice] Trying to bid... (5)
+2025/11/26 16:41:34 [Client Alice] Bid successful
+2025/11/26 16:41:35 [Client Alice] Trying to bid... (7)
+2025/11/26 16:41:35 [Client Alice] Bid successful
+2025/11/26 16:41:36 [Client Alice] Trying to bid... (9)
+2025/11/26 16:41:36 [Client Alice] Bid successful
+2025/11/26 16:41:37 [Client Alice] Trying to bid... (11)
+2025/11/26 16:41:37 [Client Alice] Bid successful
+2025/11/26 16:41:38 [Client Alice] Trying to bid... (13)
+2025/11/26 16:41:38 [Client Alice] Bid successful
+2025/11/26 16:41:39 [Client Alice] Trying to bid... (15)
+2025/11/26 16:41:39 [Client Alice] Bid successful
+2025/11/26 16:41:40 [Client Alice] Trying to bid... (17)
+2025/11/26 16:41:40 [Client Alice] Bid successful
+2025/11/26 16:41:41 [Client Alice] Trying to bid... (19)
+2025/11/26 16:41:41 [Client Alice] Bid successful
+2025/11/26 16:41:42 [Client Alice] Trying to bid... (21)
+2025/11/26 16:41:42 [Client Alice] Bid successful
+2025/11/26 16:41:45 [Client Alice] Trying to bid... (23)
+2025/11/26 16:41:45 [Client Alice] Bid successful
+2025/11/26 16:41:46 [Client Alice] Trying to bid... (25)
+2025/11/26 16:41:46 [Client Alice] Bid successful
+2025/11/26 16:41:47 [Client Alice] Trying to bid... (27)
+2025/11/26 16:41:47 [Client Alice] Bid successful
+2025/11/26 16:41:51 [Client Alice] Trying to bid... (29)
+2025/11/26 16:41:51 [Client Alice] Bid successful
+2025/11/26 16:41:52 [Client Alice] Trying to bid... (31)
+2025/11/26 16:41:52 [Client Alice] Bid successful
+2025/11/26 16:41:53 [Client Alice] Trying to bid... (33)
+2025/11/26 16:41:53 [Client Alice] Bid successful
+2025/11/26 16:41:54 [Client Alice] Trying to bid... (33)
+2025/11/26 16:41:54 [Client Alice] Bid rejected

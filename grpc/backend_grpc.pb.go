@@ -21,6 +21,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	Backend_TryToUpdateBid_FullMethodName = "/main.Backend/TryToUpdateBid"
+	Backend_Forward_FullMethodName        = "/main.Backend/Forward"
 	Backend_Election_FullMethodName       = "/main.Backend/Election"
 	Backend_Victory_FullMethodName        = "/main.Backend/Victory"
 	Backend_Ping_FullMethodName           = "/main.Backend/Ping"
@@ -31,6 +32,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type BackendClient interface {
 	TryToUpdateBid(ctx context.Context, in *Amount, opts ...grpc.CallOption) (*Ack, error)
+	Forward(ctx context.Context, in *Amount, opts ...grpc.CallOption) (*BackendAck, error)
 	Election(ctx context.Context, in *Message, opts ...grpc.CallOption) (*Answer, error)
 	Victory(ctx context.Context, in *Message, opts ...grpc.CallOption) (*Ack, error)
 	Ping(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*Answer, error)
@@ -48,6 +50,16 @@ func (c *backendClient) TryToUpdateBid(ctx context.Context, in *Amount, opts ...
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Ack)
 	err := c.cc.Invoke(ctx, Backend_TryToUpdateBid_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *backendClient) Forward(ctx context.Context, in *Amount, opts ...grpc.CallOption) (*BackendAck, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BackendAck)
+	err := c.cc.Invoke(ctx, Backend_Forward_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -89,6 +101,7 @@ func (c *backendClient) Ping(ctx context.Context, in *emptypb.Empty, opts ...grp
 // for forward compatibility.
 type BackendServer interface {
 	TryToUpdateBid(context.Context, *Amount) (*Ack, error)
+	Forward(context.Context, *Amount) (*BackendAck, error)
 	Election(context.Context, *Message) (*Answer, error)
 	Victory(context.Context, *Message) (*Ack, error)
 	Ping(context.Context, *emptypb.Empty) (*Answer, error)
@@ -104,6 +117,9 @@ type UnimplementedBackendServer struct{}
 
 func (UnimplementedBackendServer) TryToUpdateBid(context.Context, *Amount) (*Ack, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method TryToUpdateBid not implemented")
+}
+func (UnimplementedBackendServer) Forward(context.Context, *Amount) (*BackendAck, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Forward not implemented")
 }
 func (UnimplementedBackendServer) Election(context.Context, *Message) (*Answer, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Election not implemented")
@@ -149,6 +165,24 @@ func _Backend_TryToUpdateBid_Handler(srv interface{}, ctx context.Context, dec f
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(BackendServer).TryToUpdateBid(ctx, req.(*Amount))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Backend_Forward_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Amount)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BackendServer).Forward(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Backend_Forward_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BackendServer).Forward(ctx, req.(*Amount))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -217,6 +251,10 @@ var Backend_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "TryToUpdateBid",
 			Handler:    _Backend_TryToUpdateBid_Handler,
+		},
+		{
+			MethodName: "Forward",
+			Handler:    _Backend_Forward_Handler,
 		},
 		{
 			MethodName: "Election",

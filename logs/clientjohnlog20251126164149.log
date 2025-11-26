@@ -1,0 +1,17 @@
+2025/11/26 16:41:49 [Client john] Discovered server node: 1 (192.168.2.75:5001)
+2025/11/26 16:41:49 [Client john] Discovered server node: 2 (192.168.2.75:5002)
+2025/11/26 16:41:49 [Client john] connected successfully!
+2025/11/26 16:41:49 [Client john] connected to 192.168.2.75:5001
+2025/11/26 16:41:49 [Client john] Trying to bid... (1)
+2025/11/26 16:41:49 [Client john] Bid rejected
+2025/11/26 16:41:50 [Client john] Trying to bid... (28)
+2025/11/26 16:41:50 [Client john] Bid successful
+2025/11/26 16:41:51 [Client john] Trying to bid... (30)
+2025/11/26 16:41:51 [Client john] Bid successful
+2025/11/26 16:41:52 [Client john] Trying to bid... (32)
+2025/11/26 16:41:52 [Client john] Bid successful
+2025/11/26 16:41:53 [Client john] Trying to bid... (34)
+2025/11/26 16:41:53 [Client john] Bid successful
+2025/11/26 16:41:54 [Client john] Trying to bid... (34)
+2025/11/26 16:41:54 [Client john] Bid rejected
+2025/11/26 16:41:54 [Client john] Won the auction! with the bid 34, at Clock 111

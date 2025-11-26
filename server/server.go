@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	proto "main/grpc"
+	"maps"
 	"net"
 	"os"
 	"strconv"
@@ -23,18 +24,19 @@ type AuctionServer struct {
 	proto.UnimplementedAuctionServer
 	port       string
 	id         int32
-	clk        uint32
+	clk        *int32
 	bidders    map[string]string
 	currentBid int32
 	isOver     bool
 	backend    *BackendClient
+	mu         sync.Mutex
 }
 
 type BackendServer struct {
 	proto.UnimplementedBackendServer
 	port      string
 	id        string
-	clk       uint32
+	clk       int32 //Main Clock
 	isLeader  bool
 	advServer *zeroconf.Server
 	mu        sync.Mutex
@@ -43,15 +45,16 @@ type BackendServer struct {
 
 type BackendClient struct {
 	id             string
-	clk            uint32
+	clk            *int32
 	replicas       map[string]proto.BackendClient
-	seen           map[string]bool
+	lastSeen       map[string]time.Time
 	mu             sync.Mutex
 	leader         proto.BackendClient
 	leaderId       string
 	isLeader       bool
 	lastLeaderSeen time.Time
 	server         *BackendServer
+	auctionServer  *AuctionServer
 }
 
 type ServerNodeInfo struct {
@@ -63,7 +66,6 @@ type ServerNodeInfo struct {
 func main() {
 
 	var server *AuctionServer = &AuctionServer{}
-	server.clk = 0
 	server.bidders = make(map[string]string)
 	server.currentBid = 0
 	server.isOver = false
@@ -91,10 +93,14 @@ func main() {
 	backendClient := &BackendClient{
 		id:       backend.id,
 		replicas: make(map[string]proto.BackendClient),
-		seen:     make(map[string]bool),
+		lastSeen: make(map[string]time.Time),
 		isLeader: backend.isLeader}
 
 	server.backend = backendClient
+
+	//Sync clocks
+	backendClient.clk = &backend.clk
+	server.clk = &backend.clk
 
 	//Start up and configure logging output to file
 	f, err := os.OpenFile("logs/server"+fmt.Sprintf("%d", server.id)+"log"+time.Now().Format("20060102150405")+".log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
@@ -114,6 +120,7 @@ func main() {
 
 	backendClient.server = backend
 	backend.client = backendClient
+	backendClient.auctionServer = server
 
 	time.Sleep(200 * time.Millisecond)
 
@@ -132,46 +139,31 @@ func (s *AuctionServer) start_server() {
 	}
 	grpcServer := grpc.NewServer()
 	proto.RegisterAuctionServer(grpcServer, s)
-	log.Printf("Frontend: gRPC server now listening on %s... at logical time: %d \n", s.port, s.clk)
+	log.Printf("Frontend: gRPC server now listening on %s... at logical time: %d \n", s.port, *s.clk)
+
+	go s.startAdvertisingAuction()
+
+	go func() {
+		for {
+			s.mu.Lock()
+			if s.backend.isLeader {
+				log.Printf("Clock: %d", *s.clk)
+				if *s.clk > int32(100) {
+					s.isOver = true
+				}
+				s.mu.Unlock()
+				time.Sleep(4 * time.Second)
+			} else {
+				s.mu.Unlock()
+				time.Sleep(4 * time.Second)
+			}
+
+		}
+	}()
+
 	grpcServer.Serve(listener)
 
 	defer grpcServer.Stop()
-}
-
-func (s *AuctionServer) Bid(ctx context.Context, amount *proto.Amount) (*proto.Ack, error) {
-	var result proto.Ack
-	_, ok := s.bidders[amount.ClientId]
-
-	if ok {
-		//Already registered bidder
-		result = *s.UpdateBid(amount.Amount)
-	} else {
-		//Register new bidder
-		s.bidders[amount.ClientId] = amount.ClientId
-		//Then update bid
-		result = *s.UpdateBid(amount.Amount)
-	}
-
-	return &result, nil
-}
-
-func (s *AuctionServer) UpdateBid(amount int32) *proto.Ack {
-	var result proto.Ack
-	if amount > s.currentBid {
-		s.currentBid = amount
-
-		//Sync with other instances of server
-		result = proto.Ack{Ack: proto.AckTypes_SUCCESS}
-		return &result
-	} else {
-		result = proto.Ack{Ack: proto.AckTypes_FAIL}
-		return &result
-	}
-}
-
-func (s *AuctionServer) Result(ctx context.Context, empty *emptypb.Empty) (*proto.AuctionResult, error) {
-
-	return nil, errors.New("not implemented yet")
 }
 
 func (b *BackendServer) start_backend() {
@@ -188,67 +180,180 @@ func (b *BackendServer) start_backend() {
 	defer grpcServer.Stop()
 }
 
-func (b *BackendServer) UpdateLeaderStatus(isLeader bool) {
-	b.mu.Lock()
-	b.isLeader = isLeader
-	adv := b.advServer
-	b.mu.Unlock()
+func (s *AuctionServer) Bid(ctx context.Context, amount *proto.Amount) (*proto.Ack, error) {
+	s.mu.Lock()
+	if !s.isOver {
+		if !s.backend.isLeader {
+			s.mu.Unlock()
+			return s.forwardBid(ctx, amount)
+		}
+		*s.clk = max(*s.clk, amount.Clock) + 1
+		log.Printf("[Node %d] received bid from client: %s (%d)", s.id, amount.ClientId, amount.Amount)
+		// Check / register bidder
+		_, ok := s.bidders[amount.ClientId]
+		if !ok {
+			s.bidders[amount.ClientId] = amount.ClientId
+		}
+		s.mu.Unlock()
+		result := s.UpdateBid(amount.Amount)
+		return result, nil
+	} else {
+		clk := *s.clk
+		s.mu.Unlock()
+		return &proto.Ack{Clock: clk, Ack: proto.AckTypes_FAIL}, nil
+	}
+}
 
-	adv.SetText([]string{
-		"nodeID=" + b.id,
-		"isLeader=" + fmt.Sprintf("%t", b.isLeader),
-	})
-	log.Printf("[Node %s] Updated leader TXT to %t", b.id, b.isLeader)
+func (s *AuctionServer) UpdateBid(amount int32) *proto.Ack {
+	var result proto.Ack
+	s.mu.Lock()
+	*s.clk++
+	if amount > s.currentBid {
+		s.currentBid = amount
+		noOfReplicas := len(s.backend.replicas)
+		log.Printf("[Node %d] bid: %d", s.id, s.currentBid)
+		s.mu.Unlock()
+		//Sync with other instances of server
+		// asynchronously update replicas
+		if noOfReplicas > 0 {
+			_, err := s.backend.sendUpdateToReplicas(s.currentBid)
+			if err != nil {
+				log.Printf("[Node %d] an error occurred %v", s.id, err)
+			}
+		}
+		result = proto.Ack{Ack: proto.AckTypes_SUCCESS}
+		return &result
+	} else {
+		s.mu.Unlock()
+		result = proto.Ack{Ack: proto.AckTypes_FAIL}
+		return &result
+	}
+}
 
+func (s *AuctionServer) Result(ctx context.Context, empty *emptypb.Empty) (*proto.AuctionResult, error) {
+
+	s.mu.Lock()
+	if s.isOver {
+		s.mu.Unlock()
+		return &proto.AuctionResult{Clock: *s.clk, Result: s.currentBid, IsOver: s.isOver}, nil
+	} else {
+		s.mu.Unlock()
+		return &proto.AuctionResult{Clock: *s.clk, Result: s.currentBid, IsOver: s.isOver}, nil
+	}
+}
+
+func (s *AuctionServer) forwardBid(ctx context.Context, amount *proto.Amount) (*proto.Ack, error) {
+	// Check if leader is alive
+	if s.backend.IsLeaderAlive() {
+		// Use a child context with timeout when forwarding
+		forwardCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		defer cancel()
+
+		ack, err := s.backend.leader.Forward(forwardCtx, amount)
+		return &proto.Ack{Clock: ack.GetClock(), Ack: ack.GetAck()}, err
+	}
+
+	// If leader isn't alive, wait for a new leader to be elected
+	for {
+		time.Sleep(500 * time.Millisecond)
+		if s.backend.IsLeaderAlive() {
+			break
+		}
+	}
+
+	// Now try again with the new leader
+	forwardCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+
+	ack, err := s.backend.leader.Forward(forwardCtx, amount)
+	s.mu.Lock()
+	s.isOver = ack.GetIsOver()
+	s.mu.Unlock()
+	return &proto.Ack{Clock: ack.GetClock(), Ack: ack.GetAck()}, err
 }
 
 // startAdvertising registers zeroconf and keeps a reference
-func (b *BackendServer) startAdvertising() {
+func (s *AuctionServer) startAdvertisingAuction() {
+	s.mu.Lock()
+	auId := fmt.Sprintf("%d", s.id)
+	port, _ := strconv.Atoi(s.port)
+	s.mu.Unlock()
+
 	txt := []string{
-		"nodeID=" + b.id,
-		"isLeader=" + fmt.Sprintf("%t", b.isLeader),
+		"nodeID=" + auId,
 	}
 
-	port, _ := strconv.Atoi(b.port)
-
-	server, err := zeroconf.Register(
-		"node-"+b.id,
-		"_auctionBackend._tcp",
+	_, err := zeroconf.Register(
+		"node-"+auId,
+		"_auctionFrontend._tcp",
 		"local.",
 		port,
 		txt,
 		nil,
 	)
 	if err != nil {
-		log.Fatalf("Failed to advertise node %s: %v", b.id, err)
+		log.Fatalf("Failed to advertise node %s: %v", auId, err)
 	}
-
-	b.mu.Lock()
-	b.advServer = server
-	b.mu.Unlock()
-	log.Printf("[Node %s] Advertised on network (port %d) as leader? %t", b.id, port, b.isLeader)
+	log.Printf("[Node %s] Advertised frontend on network (port %d)", auId, port)
 }
 
-func (c *BackendClient) sendUpdateToReplicas(amount int32) proto.AckTypes {
-	amtMessage := proto.Amount{Clock: int32(c.clk), Amount: amount}
+func (c *BackendClient) sendUpdateToReplicas(amount int32) (proto.AckTypes, error) {
 	var noOfReplicas int = len(c.replicas)
+	c.mu.Lock()
+	replicas := make(map[string]proto.BackendClient, len(c.replicas))
+	maps.Copy(replicas, c.replicas)
 	replySuccessCount := 0
-	for _, v := range c.replicas {
-		ack, err := v.TryToUpdateBid(context.Background(), &amtMessage)
-		if err != nil {
-			log.Printf("Could not communicate with replica %s", err)
-		}
+	*c.clk++
+	clk := *c.clk
+	c.mu.Unlock()
+	if len(replicas) > 0 {
+		for _, rep := range replicas {
 
-		if ack.Ack == proto.AckTypes_SUCCESS {
-			replySuccessCount++
+			amtMessage := proto.Amount{Clock: clk, Amount: amount}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+
+			ack, err := rep.TryToUpdateBid(ctx, &amtMessage)
+			if err != nil {
+				log.Printf("[Node %s] Could not communicate with replica: %v", c.id, err)
+				break
+			}
+
+			if ack.Ack == proto.AckTypes_SUCCESS {
+				log.Printf("[Node %s] Replica updated successfully", c.id)
+			}
+
 		}
+	} else {
+		return proto.AckTypes_FAIL, errors.New("not connected to other replicas")
 	}
 
 	if replySuccessCount == noOfReplicas {
-		return proto.AckTypes_SUCCESS
+		return proto.AckTypes_SUCCESS, nil
 	} else {
-		return proto.AckTypes_FAIL
+		return proto.AckTypes_FAIL, nil
 	}
+}
+
+func (b *BackendServer) TryToUpdateBid(ctx context.Context, amount *proto.Amount) (*proto.Ack, error) {
+	b.mu.Lock()
+	b.clk = max(amount.Clock, b.clk) + 1
+	aSrv := b.client.auctionServer
+	aSrv.mu.Lock()
+	aSrv.currentBid = amount.GetAmount()
+	aSrv.mu.Unlock()
+	b.mu.Unlock()
+	return &proto.Ack{Clock: int32(b.clk), Ack: proto.AckTypes_SUCCESS}, nil
+}
+
+func (c *BackendServer) Forward(ctx context.Context, amount *proto.Amount) (*proto.BackendAck, error) {
+	log.Printf("[Node %s] received forward from client from replica: %s", c.id, amount.ClientId)
+	c.mu.Lock()
+	isOver := c.client.auctionServer.isOver
+	c.mu.Unlock()
+	ack, err := c.client.auctionServer.Bid(ctx, amount)
+	return &proto.BackendAck{Clock: ack.Clock, Ack: ack.GetAck(), IsOver: isOver}, err
 }
 
 func (c *BackendClient) startPeerDiscovery() {
@@ -258,36 +363,34 @@ func (c *BackendClient) startPeerDiscovery() {
 	go func() {
 		for {
 			time.Sleep(10 * time.Second)
-			c.mu.Lock()
-			leaderClient := c.leader
-			leaderID := c.leaderId
-			c.mu.Unlock()
+			c.IsLeaderAlive()
+		}
+	}()
 
-			if c.leader != nil {
-				_, err := leaderClient.Ping(context.Background(), &emptypb.Empty{})
-				if err != nil {
-					log.Printf("[Node %s] Leader %s unresponsive, triggering election (%v)", c.id, c.leaderId, err)
-					c.mu.Lock()
-					delete(c.replicas, leaderID)
-					c.leader = nil
-					c.leaderId = ""
-					c.mu.Unlock()
-					c.callForElection()
-				} else {
-					c.mu.Lock()
-					c.lastLeaderSeen = time.Now() // update heartbeat
-					c.mu.Unlock()
+	// Run a separate goroutine for replica timeout
+	go func() {
+		for {
+			time.Sleep(5 * time.Second)
+			c.mu.Lock()
+			for k, v := range c.lastSeen {
+				if time.Since(v) > 10*time.Second {
+					// Node k timed out
+					log.Printf("[Node %s] Node %s timed out (last seen %v)", c.id, k, v)
+
+					// Remove it from the map (or mark it dead)
+					delete(c.lastSeen, k)
+					delete(c.replicas, k)
 				}
 			}
+			c.mu.Unlock()
 		}
 	}()
 
 	// Continuous peer discovery
 	go func() {
+		discovered := make(chan ServerNodeInfo)
+		go c.discoverBackendNodes(discovered)
 		for {
-			discovered := make(chan ServerNodeInfo)
-			go c.discoverBackendNodes(discovered)
-
 			for peer := range discovered {
 				// Check if replica exists under lock
 				c.mu.Lock()
@@ -302,7 +405,10 @@ func (c *BackendClient) startPeerDiscovery() {
 						c.mu.Unlock()
 
 						log.Printf("[Node %s] Leader updated via TXT: %s", c.id, peer.nodeId)
+					} else {
+						c.lastSeen[peer.nodeId] = time.Now()
 					}
+
 					continue
 				}
 				conn, err := grpc.NewClient(peer.address, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -311,6 +417,10 @@ func (c *BackendClient) startPeerDiscovery() {
 					continue
 				}
 				client := proto.NewBackendClient(conn)
+				if client == nil {
+					log.Printf("[Node %s] gRPC returned nil client??", c.id)
+					continue
+				}
 				c.mu.Lock()
 				c.replicas[peer.nodeId] = client
 
@@ -324,6 +434,14 @@ func (c *BackendClient) startPeerDiscovery() {
 						c.lastLeaderSeen = time.Now()
 						log.Printf("[Node %s] Leader still alive %s (%s)", c.id, peer.nodeId, peer.address)
 					}
+				} else {
+					c.lastSeen[peer.nodeId] = time.Now() //Update seen timestamp
+					if c.isLeader {
+						*c.clk++
+						ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+						cancel() //Timeout
+						client.TryToUpdateBid(ctx, &proto.Amount{Amount: c.auctionServer.currentBid, Clock: *c.clk})
+					}
 				}
 
 				c.mu.Unlock()
@@ -332,6 +450,34 @@ func (c *BackendClient) startPeerDiscovery() {
 			time.Sleep(5 * time.Second) // discovery interval
 		}
 	}()
+}
+
+func (c *BackendClient) IsLeaderAlive() bool {
+	c.mu.Lock()
+	leaderClient := c.leader
+	leaderID := c.leaderId
+	c.mu.Unlock()
+
+	if c.leader != nil {
+		_, err := leaderClient.Ping(context.Background(), &emptypb.Empty{})
+		if err != nil {
+			log.Printf("[Node %s] Leader %s unresponsive, triggering election (%v)", c.id, c.leaderId, err)
+			c.mu.Lock()
+			delete(c.replicas, leaderID)
+			c.leader = nil
+			c.leaderId = ""
+			c.mu.Unlock()
+			go c.callForElection()
+			return false
+		} else {
+			c.mu.Lock()
+			c.lastLeaderSeen = time.Now() // update heartbeat
+			c.mu.Unlock()
+			return true
+		}
+	} else {
+		return false //Leader is not set
+	}
 }
 
 func (c *BackendClient) discoverBackendNodes(discovered chan<- ServerNodeInfo) {
@@ -368,16 +514,62 @@ func (c *BackendClient) discoverBackendNodes(discovered chan<- ServerNodeInfo) {
 	}(entries)
 
 	// Long-lived browse context
+	// Start browsing
 	ctx := context.Background()
-	if err := resolver.Browse(ctx, "_auctionBackend._tcp", "local.", entries); err != nil {
-		log.Fatalf("[%s] Failed to browse: %v", c.id, err)
+	go func() {
+		for {
+			if err := resolver.Browse(ctx, "_auctionBackend._tcp", "local.", entries); err != nil {
+				log.Printf("[Node %s] Browse error: %v", c.id, err)
+			}
+			time.Sleep(5 * time.Second) // Retry interval
+		}
+	}()
+}
+
+// startAdvertising registers zeroconf and keeps a reference
+func (b *BackendServer) startAdvertising() {
+	txt := []string{
+		"nodeID=" + b.id,
+		"isLeader=" + fmt.Sprintf("%t", b.isLeader),
 	}
+
+	port, _ := strconv.Atoi(b.port)
+
+	server, err := zeroconf.Register(
+		"node-"+b.id,
+		"_auctionBackend._tcp",
+		"local.",
+		port,
+		txt,
+		nil,
+	)
+	if err != nil {
+		log.Fatalf("Failed to advertise node %s: %v", b.id, err)
+	}
+
+	b.mu.Lock()
+	b.advServer = server
+	b.mu.Unlock()
+	log.Printf("[Node %s] Advertised on network (port %d) as leader? %t", b.id, port, b.isLeader)
+}
+
+func (b *BackendServer) UpdateLeaderStatus(isLeader bool) {
+	b.mu.Lock()
+	b.isLeader = isLeader
+	adv := b.advServer
+	b.mu.Unlock()
+
+	adv.SetText([]string{
+		"nodeID=" + b.id,
+		"isLeader=" + fmt.Sprintf("%t", b.isLeader),
+	})
+	log.Printf("[Node %s] Updated leader TXT to %t", b.id, b.isLeader)
+
 }
 
 func (c *BackendClient) callForElection() {
 	c.mu.Lock()
 	nodeId, _ := strconv.Atoi(c.id)
-	clk := c.clk
 	if len(c.replicas) <= 0 {
 		log.Printf("[Node %s] No other replicas in network, I will promote myself to leader! ", c.id)
 		c.isLeader = true
@@ -385,35 +577,37 @@ func (c *BackendClient) callForElection() {
 		c.server.UpdateLeaderStatus(true)
 		return
 	} else {
-		// Copy replicas map to slice
-		replicas := make([]proto.BackendClient, 0, len(c.replicas))
-		for _, r := range c.replicas {
-			replicas = append(replicas, r)
-		}
+		// Copy replicas map
+		replicas := make(map[string]proto.BackendClient, len(c.replicas))
+		maps.Copy(replicas, c.replicas)
 		c.mu.Unlock()
 
-		log.Printf("[Node %d] Calling an election between %d nodes", c.id, len(replicas))
+		log.Printf("[Node %s] Calling an election between %d nodes", c.id, len(replicas))
 		alive := false
+		c.mu.Lock()
+		*c.clk++ //Update clock once, as we "broadcast" once...
+		c.mu.Unlock()
 		var wg sync.WaitGroup
 		for replicaId, replica := range replicas {
-			if replicaId <= nodeId {
+			replicaId_string, _ := strconv.Atoi(replicaId)
+			if replicaId_string <= nodeId {
 				// Skip replicas with lower or equal IDs
 				continue
 			}
 			wg.Add(1) //Increment the "work-to-be-done" counter
-			go func(r proto.BackendClient, rid int) {
+			go func(r proto.BackendClient, rid string) {
 				defer wg.Done() //mark the job as done
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				defer cancel() //Timeout
-				answer, err := r.Election(ctx, &proto.Message{Id: fmt.Sprintf("%d", nodeId), Clock: int32(clk)})
+				answer, err := r.Election(ctx, &proto.Message{Id: fmt.Sprintf("%d", nodeId), Clock: *c.clk})
 				if err != nil {
-					log.Printf("[Node %d] Failed to call Election on replica %d: %v", c.id, rid, err)
+					log.Printf("[Node %s] Failed to call Election on replica %s: %v", c.id, rid, err)
 					return
 				}
 
 				if answer != nil {
 					//The replica is alive, we can stop
-					log.Printf("[Node %d] Got an answer back from replica: %d", c.id, answer.GetId())
+					log.Printf("[Node %s] Got an answer back from replica: %s", c.id, answer.GetId())
 					alive = true
 				}
 			}(replica, replicaId)
@@ -424,7 +618,7 @@ func (c *BackendClient) callForElection() {
 
 		if !alive {
 			log.Printf("[Node %s] No replicas responded, I will promote myself to leader!", c.id)
-			c.broadcastVictory()
+			c.broadcastVictory() //Broadcast to other replicas
 			c.mu.Lock()
 			c.isLeader = true
 			c.mu.Unlock()
@@ -438,16 +632,15 @@ func (c *BackendClient) callForElection() {
 
 func (c *BackendClient) broadcastVictory() {
 	c.mu.Lock()
-	replicas := make(map[string]proto.BackendClient)
-	for k, v := range c.replicas {
-		replicas[k] = v
-	}
+	replicas := make(map[string]proto.BackendClient, len(c.replicas))
+	maps.Copy(replicas, c.replicas)
+	*c.clk++ //Update clock once, as we "broadcast" once...
 	c.mu.Unlock()
 
 	var wg sync.WaitGroup
 
 	for replicaId, replica := range replicas {
-		if replicaId == fmt.Sprintf("%d", c.id) {
+		if replicaId == c.id {
 			continue // skip self
 		}
 
@@ -457,29 +650,46 @@ func (c *BackendClient) broadcastVictory() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 
-			_, err := r.Victory(ctx, &proto.Message{
-				Id:    fmt.Sprintf("%d", c.id),
-				Clock: int32(c.clk),
-			})
+			msg := &proto.Message{
+				Id:    c.id,
+				Clock: *c.clk}
+			_, err := r.Victory(ctx, msg)
 			if err != nil {
-				log.Printf("[Node %d] Failed to send Victory to replica %s: %v", c.id, rid, err)
+				log.Printf("[Node %s] Failed to send Victory to replica %s: %v", c.id, rid, err)
 			} else {
-				log.Printf("[Node %d] Successfully sent Victory to replica %s", c.id, rid)
+				log.Printf("[Node %s] Successfully sent Victory to replica %s", c.id, rid)
 			}
 		}(replica, replicaId)
 	}
 
 	wg.Wait()
-	log.Printf("[Node %d] Victory broadcast complete", c.id)
+	log.Printf("[Node %s] Victory broadcast complete", c.id)
 }
 
 func (b *BackendServer) Ping(ctx context.Context, empty *emptypb.Empty) (*proto.Answer, error) {
-	log.Printf("[Node %s] got pinged, returning ok!", b.id)
 	// Simply return OK
 	return &proto.Answer{Clock: int32(b.clk), Id: b.id}, nil
 }
 
 func (b *BackendServer) Election(ctx context.Context, msg *proto.Message) (*proto.Answer, error) {
+	b.mu.Lock()
+	b.clk = max(msg.Clock, b.clk) + 1
+	b.mu.Unlock()
 	go b.client.callForElection()                            //Start our own election process
 	return &proto.Answer{Id: b.id, Clock: int32(b.clk)}, nil //Return ok to node calling for election
+}
+
+func (b *BackendServer) Victory(ctx context.Context, msg *proto.Message) (*proto.Ack, error) {
+	b.mu.Lock()
+	b.clk = max(msg.Clock, b.clk) + 1
+	c := b.client
+	b.mu.Unlock()
+	c.mu.Lock()
+	c.leader = c.replicas[msg.GetId()]
+	c.leaderId = msg.GetId()
+	c.lastLeaderSeen = time.Now()
+	c.mu.Unlock()
+
+	log.Printf("[Node %s] Leader updated via election: %s", c.id, msg.GetId())
+	return &proto.Ack{Clock: int32(b.clk), Ack: proto.AckTypes_SUCCESS}, nil
 }

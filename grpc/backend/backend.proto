@@ -7,6 +7,7 @@ import "grpc/auctionServer/auction.proto";
 
 service Backend {
    rpc TryToUpdateBid (Amount) returns (Ack);
+   rpc Forward  (Amount) returns (BackendAck);
    rpc Election (Message) returns (Answer);
    rpc Victory (Message) returns (Ack);
    rpc Ping (google.protobuf.Empty) returns (Answer);
@@ -20,4 +21,10 @@ message Answer{
 message Message{
     string id = 1;
     int32 clock = 2;
+}
+
+message BackendAck{
+    int32 clock = 2; //Logical Lamport clock
+    Ack_types ack = 3;
+    bool isOver = 4;
 }
